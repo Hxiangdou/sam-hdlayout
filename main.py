@@ -18,6 +18,7 @@ from models.sam_hdlayout import build
 from utils.plotUtils import DataRender, json_save
 from torch.utils.tensorboard import SummaryWriter
 from models.vit_util import custom_collate
+from torch.optim.lr_scheduler import LambdaLR
 
 def get_args_parser():
     parser = argparse.ArgumentParser('Set HDLayout model', add_help=False)
@@ -129,11 +130,21 @@ def main(args):
                                   weight_decay=args.weight_decay)
     # lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, args.lr_drop)
     
-    lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, 
-        T_max=args.epochs, 
-        eta_min=1e-6
-    )
+    # lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+    #     optimizer, 
+    #     T_max=args.epochs, 
+    #     eta_min=1e-6
+    # )
+    def lr_lambda(epoch):
+        warmup_epochs = 10  # 前 5 轮线性预热
+        if epoch < warmup_epochs:
+            return (epoch + 1) / warmup_epochs
+        return 1.0
+
+    warmup_scheduler = LambdaLR(optimizer, lr_lambda=lr_lambda)
+    cosine_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs - 10, eta_min=1e-6)
+    lr_scheduler = torch.optim.lr_scheduler.SequentialLR(optimizer, schedulers=[warmup_scheduler, cosine_scheduler], milestones=[10])
+    
     dataset_train = buildDataset(image_set='train', args=args)
     dataset_val = buildDataset(image_set='val', args=args)
 
@@ -181,6 +192,7 @@ def main(args):
 
     print("Start training")
     start_time = time.time()
+    
     for epoch in range(args.start_epoch, args.epochs):
         # if args.distributed:
         #     sampler_train.set_epoch(epoch)

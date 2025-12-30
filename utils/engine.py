@@ -39,7 +39,9 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
     print_freq = 30
 
     ispower = False
-    
+    accumulation_steps = 4
+    optimizer.zero_grad()
+    i = 0
     for imgs, targets, _ in metric_logger.log_every(data_loader, print_freq, header):
         imgs = imgs.to(device)
         # block_bboxes = torch.tensor(np.array([bbox[0] for bbox in block_bboxes])).to(device)
@@ -72,14 +74,18 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
             print(loss_dict_reduced)
             sys.exit(1)
 
-        optimizer.zero_grad()
+        losses = losses / accumulation_steps
         losses.backward()
-        if max_norm > 0:
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm)
-        optimizer.step()
+        
+        if (i + 1) % accumulation_steps == 0:
+            if max_norm > 0:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm)
+            optimizer.step()
+            optimizer.zero_grad()
 
         metric_logger.update(loss=loss_value, **loss_dict_reduced_scaled, **loss_dict_reduced_unscaled)
         metric_logger.update(lr=optimizer.param_groups[0]["lr"])
+        i += 1
     # gather the stats from all processes
     metric_logger.synchronize_between_processes()
     print("Averaged stats:", metric_logger)

@@ -35,7 +35,8 @@ class HungarianMatcher(nn.Module):
         bs, num_queries = outputs["pred_logits"].shape[:2]
 
         # We flatten to compute the cost matrices in a batch
-        out_prob = outputs["pred_logits"].flatten(0, 1).softmax(-1)  # [batch_size * num_queries, num_classes]
+        # out_prob = outputs["pred_logits"].flatten(0, 1).softmax(-1)  # [batch_size * num_queries, num_classes]
+        out_prob = outputs["pred_logits"].flatten(0, 1).sigmoid()
         out_bbox = outputs["pred_boxes"].flatten(0, 1)  # [batch_size * num_queries, 4]
 
         # Also concat the target labels and boxes
@@ -61,7 +62,8 @@ class HungarianMatcher(nn.Module):
         bs, num_queries = outputs["pred_logits"].shape[:2]
 
         # We flatten to compute the cost matrices in a batch
-        out_prob = outputs["pred_logits"].flatten(0, 1).softmax(-1)  # [batch_size * num_queries, num_classes]
+        # out_prob = outputs["pred_logits"].flatten(0, 1).softmax(-1)  # [batch_size * num_queries, num_classes]
+        out_prob = outputs["pred_logits"].flatten(0, 1).sigmoid()
         out_points = outputs["pred_points"].flatten(0, 1)  # [batch_size * num_queries, 16]
 
         # Also concat the target labels and boxes
