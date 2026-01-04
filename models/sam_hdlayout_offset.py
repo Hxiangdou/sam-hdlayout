@@ -90,12 +90,9 @@ class SAM_HDLayout(nn.Module):
         print(f"Prompt Encoder Load Msg: {msg2}")
         
     def forward(self, x, prompts=None):
-        """
-        prompts: 列表，每个元素是字典 {'points':..., 'labels':..., 'boxes':...}
-        """
         B = x.shape[0]
-        img_embeddings = self.visual_encoder(x) # [B, 256, 64, 64]
-        memory = img_embeddings.flatten(2).permute(0, 2, 1) # [B, 4096, 256]
+        img_embeddings = self.visual_encoder(x)
+        memory = img_embeddings.flatten(2).permute(0, 2, 1)
         
         sparse_embeddings_list = []
         for i in range(B):
@@ -105,29 +102,57 @@ class SAM_HDLayout(nn.Module):
             )
             sparse_embeddings_list.append(se.mean(dim=1)) # 取平均
         sparse_embeddings = torch.stack(sparse_embeddings_list) # [B, 1, 256]
-        prompt_enbeddings = self.prompt_fusion(sparse_embeddings)
+        # prompt_enbeddings = self.prompt_fusion(sparse_embeddings)
         
-        block_q = self.block_queries.repeat(B, 1, 1) + prompt_enbeddings
+        block_q = self.block_queries.repeat(B, 1, 1) + self.prompt_fusion(sparse_embeddings)
 
-        # Block Level
+        # 1. Block Level (预测绝对坐标 0-1)
         hs_block = self.block_decoder(tgt=block_q.transpose(0, 1), memory=memory.transpose(0, 1))
         out_block = hs_block[-1].transpose(0, 1)
-        block_bbox = self.block_reg(out_block)
+        # 使用 sigmoid 确保 block 在图像内
+        block_bbox = self.block_reg(out_block).sigmoid() 
         
-        # Line Level
+        # 2. Line Level (预测相对于 Block 的偏移)
         line_q = (out_block + self.block_pe(block_bbox)).unsqueeze(2) + \
-                 self.line_sub_embed.weight.unsqueeze(0).unsqueeze(0) + prompt_enbeddings.unsqueeze(2)
-        
+                 self.line_sub_embed.weight.unsqueeze(0).unsqueeze(0)
         line_q = line_q.flatten(1, 2)
-
-        line_bbox = self.line_reg(line_q)
         
-        # Char Level
+        # 预测相对偏移 [B, N_line, 4]，使用 sigmoid 限制在 [0, 1]
+        line_offsets = self.line_reg(line_q).sigmoid() 
+        
+        # 核心：将 line 坐标投影到所属 block 内部
+        # 找到每个 line 对应的 parent block
+        # line_q 的顺序是 [block0_line0, block0_line1, ..., block1_line0, ...]
+        parent_blocks = block_bbox.repeat_interleave(self.lines_per_block, dim=1)
+        
+        b_cx, b_cy, b_w, b_h = parent_blocks.unbind(-1)
+        l_dx, l_dy, l_dw, l_dh = line_offsets.unbind(-1)
+        
+        # 计算 line 的绝对中心和宽高
+        # (l_dx - 0.5) 让行可以在 block 内部中心上下左右移动
+        line_cx = b_cx + (l_dx - 0.5) * b_w
+        line_cy = b_cy + (l_dy - 0.5) * b_h
+        line_w = l_dw * b_w
+        line_h = l_dh * b_h
+        line_bbox = torch.stack([line_cx, line_cy, line_w, line_h], dim=-1)
+        
+        # 3. Char Level (预测相对于 Line 的偏移)
         char_q = (line_q + self.line_pe(line_bbox)).unsqueeze(2) + \
-                 self.char_sub_embed.weight.unsqueeze(0).unsqueeze(0) + prompt_enbeddings.unsqueeze(2)
-                 
+                 self.char_sub_embed.weight.unsqueeze(0).unsqueeze(0)
         char_q = char_q.flatten(1, 2)
-        char_bezier = self.char_reg(char_q)
+        
+        # 预测 8 个点的相对偏移 [B, N_char, 16]
+        char_offsets = self.char_reg(char_q).sigmoid()
+        
+        # 找到每个 char 对应的 parent line
+        parent_lines = line_bbox.repeat_interleave(self.chars_per_line, dim=1)
+        l_cx, l_cy, l_w, l_h = parent_lines.unbind(-1)
+        
+        # 还原 8 个控制点 (x, y)
+        char_offsets = char_offsets.view(B, -1, 8, 2)
+        char_x = l_cx.unsqueeze(-1) + (char_offsets[..., 0] - 0.5) * l_w.unsqueeze(-1)
+        char_y = l_cy.unsqueeze(-1) + (char_offsets[..., 1] - 0.5) * l_h.unsqueeze(-1)
+        char_bezier = torch.stack([char_x, char_y], dim=-1).flatten(2)
 
         return {
             'pred_block': block_bbox, 'pred_block_logits': self.block_class(out_block),
@@ -312,54 +337,6 @@ class SetCriterion(nn.Module):
 # Post Processor & Build
 # =============================================================================
 
-# class PostProcess(nn.Module):
-    # def __init__(self, score_thresh=0.5, nms_thresh=0.4):
-    #     super().__init__()
-    #     self.score_thresh = score_thresh
-    #     self.nms_thresh = nms_thresh
-        
-    # @torch.no_grad()
-    # def forward(self, outputs, target_sizes):
-    #     out_block = outputs['pred_block']
-    #     out_line = outputs['pred_line']
-    #     out_char = outputs['pred_char']
-        
-    #     # out_block_scores = outputs['pred_block_logits'].sigmoid().squeeze(-1)
-    #     # out_line_scores = outputs['pred_line_logits'].sigmoid().squeeze(-1)
-    #     # out_char_scores = outputs['pred_char_logits'].sigmoid().squeeze(-1)
-    #     out_block_scores = F.softmax(outputs['pred_block_logits'], -1)
-    #     out_line_scores = F.softmax(outputs['pred_line_logits'], -1)
-    #     out_char_scores = F.softmax(outputs['pred_char_logits'], -1)
-        
-    #     prob_block, label_block = out_block_scores.max(-1)
-    #     prob_line, label_line = out_line_scores.max(-1)
-    #     prob_char, label_char = out_char_scores.max(-1)
-        
-    #     results = []
-    #     for i in range(len(target_sizes)):
-    #         # t = 0.4
-            
-    #         # keep_block = out_block_scores[i] > t
-    #         # keep_line = out_line_scores[i] > t
-    #         # keep_char = out_char_scores[i] > t
-    #         keep_block = label_block[i] != 1
-    #         keep_line = label_line[i] != 1
-    #         keep_char = label_char[i] != 1
-            
-    #         img_h, img_w = target_sizes[i]
-    #         scale = torch.tensor([img_w, img_h, img_w, img_h], device=out_block.device)
-            
-    #         block_boxes = box_cxcywh_to_xyxy(out_block[i][keep_block]) * scale
-    #         line_boxes = box_cxcywh_to_xyxy(out_line[i][keep_line]) * scale
-    #         char_beziers = out_char[i][keep_char] * target_sizes[i].repeat(8)
-            
-    #         results.append({
-    #             'block_bbox': [block_boxes],
-    #             'line_bbox': [line_boxes],
-    #             'char_bezier': [char_beziers]
-    #         })
-    #     return results
-
 
 from torchvision.ops import nms
 
@@ -368,11 +345,38 @@ class PostProcess(nn.Module):
         super().__init__()
         self.max_select = max_select # 每个层级最多选出的数量
         self.nms_thresh = nms_thresh
+        self.lines_per_block = 4
+        self.chars_per_line = 1
+        self.belong_thresh = 0.6 # 归属关系阈值
+        
+    @torch.no_grad()
+    def get_bezier_aabb(self, control_points, sample_num=10):
+        """
+        内部函数：利用采样点计算三阶 Bezier 曲线的精确 AABB
+        control_points: [N, 8, 2]
+        """
+        N = control_points.shape[0]
+        device = control_points.device
+        t = torch.linspace(0, 1, sample_num, device=device).view(1, sample_num, 1)
+        
+        p_top = control_points[:, 0:4, :]
+        p_bottom = control_points[:, 4:8, :]
+        
+        t_inv = 1.0 - t
+        bezier_basis = torch.cat([
+            t_inv ** 3, 3 * t * (t_inv ** 2), 3 * (t ** 2) * t_inv, t ** 3
+        ], dim=-1).view(1, sample_num, 4)
+        
+        pts_top = torch.matmul(bezier_basis, p_top)
+        pts_bottom = torch.matmul(bezier_basis, p_bottom)
+        all_pts = torch.cat([pts_top, pts_bottom], dim=1)
+        
+        # 计算精确 AABB
+        aabb = torch.cat([all_pts.min(dim=1)[0], all_pts.max(1)[0]], dim=1)
+        return aabb
 
     @torch.no_grad()
     def forward(self, outputs, target_sizes):
-        # 1. 激活 Logits。确保模型输出已适配 Sigmoid。
-        # 如果是单通道输出 [B, N, 1]，直接 squeeze；如果是多通道，取前景通道 [B, N, 0]
         def get_probs(logits):
             probs = logits.sigmoid()
             return probs[..., 0] if probs.shape[-1] > 1 else probs.squeeze(-1)
@@ -387,46 +391,82 @@ class PostProcess(nn.Module):
             scale_box = torch.tensor([img_w, img_h, img_w, img_h], device=b_probs.device)
             scale_pts = target_sizes[i].repeat(8).to(b_probs.device)
 
-            # 封装处理逻辑：Top-K -> NMS
-            def filter_layer(probs, raw_data, is_bezier=False):
-                # a. 动态 Top-K：先取前 K 个得分最高的，无论分值多低
+            def filter_layer(probs, raw_data, parent_raw=None, expansion_factor=1, is_bezier=False):
+                # 1. Top-K 粗选候选 Query
                 k = min(self.max_select, probs.shape[0])
                 topk_values, topk_indices = torch.topk(probs, k)
                 
-                # b. 自动阈值：如果 Top1 的分数都很低，我们至少允许它被选出来
-                # 这里可以设置一个非常底线的阈值，比如 0.1
                 keep_mask = topk_values > 0.1 
-                if not keep_mask.any(): # 如果连 0.1 都没有，强行取 Top1
+                if not keep_mask.any():
                     keep_mask[0] = True
                 
                 select_scores = topk_values[keep_mask]
                 select_indices = topk_indices[keep_mask]
                 
+                # 2. 准备候选数据与对应的精确 AABB
                 if is_bezier:
-                    data = raw_data[select_indices] * scale_pts
-                    # 贝塞尔转 AABB 用于 NMS
-                    pts = data.view(-1, 8, 2)
-                    boxes = torch.cat([pts.min(1)[0], pts.max(1)[0]], dim=1)
+                    # 原始控制点数据 (用于最终返回) [K, 8, 2]
+                    ctrl_pts = (raw_data[select_indices] * scale_pts).view(-1, 8, 2)
+                    # 内部计算精确 AABB (用于 NMS 和从属判断)
+                    boxes = self.get_bezier_aabb(ctrl_pts)
+                    # data 此时应保存控制点，以便最终返回
+                    data = ctrl_pts 
                 else:
                     data = box_cxcywh_to_xyxy(raw_data[select_indices]) * scale_box
                     boxes = data
 
-                # c. NMS 剔除重叠
-                keep_nms = nms(boxes, select_scores, self.nms_thresh)
-                return data[keep_nms], select_scores[keep_nms]
+                # 3. 归属关系判断 (使用子项 AABB 与父项 BBox 的重叠度)
+                if parent_raw is not None:
+                    p_indices = select_indices // expansion_factor
+                    p_boxes = box_cxcywh_to_xyxy(parent_raw[p_indices]) * scale_box
+                    
+                    ix1, iy1 = torch.max(boxes[:, 0], p_boxes[:, 0]), torch.max(boxes[:, 1], p_boxes[:, 1])
+                    ix2, iy2 = torch.min(boxes[:, 2], p_boxes[:, 2]), torch.min(boxes[:, 3], p_boxes[:, 3])
+                    
+                    inters = (ix2 - ix1).clamp(min=0) * (iy2 - iy1).clamp(min=0)
+                    child_areas = (boxes[:, 2] - boxes[:, 0]) * (boxes[:, 3] - boxes[:, 1])
+                    
+                    belong_ratio = inters / (child_areas + 1e-6)
+                    valid_mask = belong_ratio > self.belong_thresh
+                    
+                    if not valid_mask.any():
+                        valid_mask[belong_ratio.argmax()] = True
+                    
+                    # 联动更新：同时更新返回数据、AABB 和分数
+                    data = data[valid_mask]
+                    boxes = boxes[valid_mask]
+                    select_scores = select_scores[valid_mask]
+                else:
+                    # Block 层级处理
+                    data[:, [0, 2]] = data[:, [0, 2]].clamp(0, img_w)
+                    data[:, [1, 3]] = data[:, [1, 3]].clamp(0, img_h)
 
-            # 执行过滤
-            res_b, score_b = filter_layer(b_probs[i], outputs['pred_block'][i])
-            res_l, score_l = filter_layer(l_probs[i], outputs['pred_line'][i])
-            res_c, score_c = filter_layer(c_probs[i], outputs['pred_char'][i], is_bezier=True)
+                # 4. NMS 去重 (基于 boxes 坐标，但筛选 data 数据)
+                if boxes.shape[0] > 0:
+                    keep_nms = nms(boxes, select_scores, self.nms_thresh)
+                    # 返回经过 NMS 的原始控制点 (如果是 bezier) 或框 (如果是 block/line)
+                    final_data = data[keep_nms]
+                    # 如果是 Bezier，将其展平回 [N, 16] 格式，方便可视化工具调用
+                    if is_bezier:
+                        final_data = final_data.flatten(1)
+                    return final_data, select_scores[keep_nms]
+                
+                return data, select_scores
+
+            # 执行过滤逻辑
+            res_b, _ = filter_layer(b_probs[i], outputs['pred_block'][i])
+            res_l, _ = filter_layer(l_probs[i], outputs['pred_line'][i], 
+                                    parent_raw=outputs['pred_block'][i], 
+                                    expansion_factor=self.lines_per_block)
+            res_c, _ = filter_layer(c_probs[i], outputs['pred_char'][i], 
+                                    parent_raw=outputs['pred_line'][i], 
+                                    expansion_factor=self.chars_per_line, 
+                                    is_bezier=True)
 
             results.append({
                 'block_bbox': [res_b],
-                # 'block_scores': score_b,
                 'line_bbox': [res_l],
-                # 'line_scores': score_l,
                 'char_bezier': [res_c],
-                # 'char_scores': score_c
             })
         return results
 

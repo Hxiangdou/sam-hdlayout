@@ -13,8 +13,8 @@ class HDLayoutDataset(Dataset):
         self.json_folder = json_file
         self.block_bbox_path = os.path.join(self.json_folder, 'block')
         self.line_bbox_path = os.path.join(self.json_folder, 'line1')
-        self.char_bezier_path = os.path.join(self.json_folder, 'line2')
-        # self.char_bezier_path = os.path.join(self.json_folder, 'char_gt')
+        # self.char_bezier_path = os.path.join(self.json_folder, 'line2')
+        self.char_bezier_path = os.path.join(self.json_folder, 'char_gt')
         # transforms
         self._transforms = transforms
         self.expand_factor = expand_factor # 保存扩充倍数
@@ -98,8 +98,9 @@ class HDLayoutDataset(Dataset):
         drawn_block = set()
         # 加载对应的line2
         for line2_shape in line2_data['shapes']:
-            line1_label = line2_shape.get('bbox_label')
+            line1_label = line2_shape.get('region_label')
             if line1_label is not None:
+                line2_shape['points'] = [item for sublist in line2_shape['points'] for item in sublist]
                 if len(line2_shape['points']) < 16:
                     print('line2data num error.')
                     continue

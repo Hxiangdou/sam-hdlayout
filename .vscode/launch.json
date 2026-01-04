@@ -16,7 +16,24 @@
                 "--no_aux_loss",
                 "--output_dir", "/data/fength/HDDiffuser-Text/outputs/",
                 "--tensorboard_dir", "/data/fength/HDDiffuser-Text/HDlayout-logs/",
-                "--batch_size", "4",
+                "--batch_size", "2",
+            ]
+        },
+        {
+            "name": "Python Val debugger",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${file}",
+            "console": "integratedTerminal",
+            "args": [
+                "--dataset_path", "/data/LATEX-EnxText-new/",
+                "--device", "cuda:0",
+                "--no_aux_loss",
+                "--output_dir", "/data/fength/HDDiffuser-Text/outputs/",
+                "--tensorboard_dir", "/data/fength/HDDiffuser-Text/HDlayout-logs/",
+                "--resume", "/data/fength/HDDiffuser-Text/outputs/20251230-173640/20251230_173644/checkpoint.pth",
+                "--batch_size", "2",
+                "--eval"
             ]
         }
     ]

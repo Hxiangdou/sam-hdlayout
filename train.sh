@@ -3,7 +3,7 @@
 lr=5e-5
 dropout=0.1
 weight_decay=1e-2
-batchsize=10
+batchsize=12
 dataset_path="/data/LATEX-EnxText-new/"
 output_dir="/data/fength/HDDiffuser-Text/outputs/"
 tensorboard_dir="/data/fength/HDDiffuser-Text/HDlayout-logs/"

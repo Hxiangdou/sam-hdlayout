@@ -32,6 +32,9 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
     #             param.requires_grad = True
             
     model.train()
+    # model.visual_encoder.eval()  # SAM Backbone 设定为 eval 模式
+    # model.prompt_encoder.eval()  # SAM Prompt Encoder 设定为 eval 模式
+    
     criterion.train()
     metric_logger = utils.MetricLogger(delimiter="  ")
     metric_logger.add_meter('lr', utils.SmoothedValue(window_size=1, fmt='{value:.6f}'))
@@ -129,7 +132,7 @@ def evaluate(model, criterion, postprocessors, data_loader, device, output_dir, 
         orig_target_sizes = torch.stack([t["orig_size"] for t in targets], dim=0)
         results = postprocessors['res'](outputs, orig_target_sizes)
 
-        if len(render_res) < 6:
+        if not eval and len(render_res) < 6:
             render_res.append({
                 "img_path": img_paths[0],
                 "prompts": prompts[0],
@@ -141,10 +144,16 @@ def evaluate(model, criterion, postprocessors, data_loader, device, output_dir, 
                     "img_path": img_path,
                     "results": result
                 })
+            for i, p, r in zip(img_paths, prompts, results):
+                render_res.append({
+                    "img_path": i,
+                    "prompts": p,
+                    "results": r
+                })
     # gather the stats from all processes
     metric_logger.synchronize_between_processes()
     print("Averaged stats:", metric_logger)
     stats = {k: meter.global_avg for k, meter in metric_logger.meters.items()}
     if eval:
-        return stats, json_res
+        return stats, json_res, render_res
     return stats, render_res

@@ -1,5 +1,5 @@
 import random
-from dataset.hdlayout3k import HDLayoutDataset, make_hdlayout_transforms
+from dataset.hdlayout3k_gt import HDLayoutDataset, make_hdlayout_transforms
 from pathlib import Path
 import torch
 
@@ -8,7 +8,8 @@ class SAMHDLayoutDataset(HDLayoutDataset):
         super().__init__(img_folder, json_file, transforms, num_queries, expand_factor)
     
     def __len__(self):
-        return super().__len__()
+        # return super().__len__()
+        return 3
         # return 30
     
     def __getitem__(self, idx):

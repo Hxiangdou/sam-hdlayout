@@ -14,7 +14,7 @@ import utils.misc as utils
 from dataset.hdlayout3k_sam import buildDataset
 from utils.engine import evaluate, train_one_epoch
 # from models.dino_hdlayout_v6 import build
-from models.sam_hdlayout import build
+from models.sam_hdlayout_offset import build
 from utils.plotUtils import DataRender, json_save
 from torch.utils.tensorboard import SummaryWriter
 from models.vit_util import custom_collate
@@ -119,6 +119,9 @@ def main(args):
     n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print('number of params:', n_parameters)
 
+    # model_without_ddp.visual_encoder.eval()  # SAM Backbone 设定为 eval 模式
+    # model_without_ddp.prompt_encoder.eval()  # SAM Prompt Encoder 设定为 eval 模式
+    
     param_dicts = [
         {"params": [p for n, p in model_without_ddp.named_parameters() if "backbone" not in n and p.requires_grad]},
         {
@@ -147,7 +150,8 @@ def main(args):
     
     dataset_train = buildDataset(image_set='train', args=args)
     dataset_val = buildDataset(image_set='val', args=args)
-
+    print(f"dataset_train size: {len(dataset_train)}"
+          f"dataset_val size: {len(dataset_val)}")
     sampler_train = torch.utils.data.RandomSampler(dataset_train)
     sampler_val = torch.utils.data.SequentialSampler(dataset_val)
 
@@ -181,10 +185,28 @@ def main(args):
         print(f"Resume training from {args.resume}, start epoch from {args.start_epoch}")
 
     if args.eval:
-        test_stats, json_res = evaluate(
+        epoch = 0
+        test_stats, json_res, render_res = evaluate(
             model, criterion, postprocessors, data_loader_val, device, args.output_dir, args.eval
         )
+        writer = SummaryWriter(os.path.join(args.tensorboard_dir, time_now))
+        
+        log_stats = {**{f'test_{k}': v for k, v in test_stats.items()},
+                     'epoch': epoch,
+                     'n_parameters': n_parameters}
+        
+        for key, value in log_stats.items():
+            writer.add_scalar(key, value, epoch)
+        
+        render = DataRender()
+        res_render = render.render(render_res)
+        
+        for key, value in res_render.items():
+            writer.add_images(key, render.pil_to_nchw(value), epoch)
+            
+            
         print(f"samples result save: {output_dir}")
+        
         json_path = os.path.join(output_dir, 'jsons')
         os.makedirs(json_path, exist_ok=True)
         json_save(json_res, json_path)
